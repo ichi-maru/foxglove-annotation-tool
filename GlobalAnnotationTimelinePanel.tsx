@@ -2,7 +2,7 @@ import { PanelExtensionContext } from "@foxglove/extension";
 import { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-// ─── SHARED HELPERS (duplicated from ExamplePanel.tsx / SecondPanel.tsx on
+// ─── SHARED HELPERS (duplicated from MainPanel.tsx / SignalPlotPanel.tsx on
 //     purpose, so each panel file stays self-contained. Pull these into a
 //     shared utils.ts if the duplication starts to bother you.) ───────────
 function timeToNanos(t: { sec: number; nsec: number }): number {

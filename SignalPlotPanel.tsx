@@ -2,7 +2,7 @@ import { Immutable, PanelExtensionContext, Topic } from "@foxglove/extension";
 import { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 
-// ─── SHARED HELPERS (duplicated from ExamplePanel.tsx on purpose, so each
+// ─── SHARED HELPERS (duplicated from MainPanel.tsx on purpose, so each
 //     panel file stays self-contained. Pull these into a shared utils.ts if
 //     the duplication starts to bother you.) ───────────────────────────────
 function timeToNanos(t: { sec: number; nsec: number }): number {
@@ -132,7 +132,7 @@ const PLOT_H = 260;
 const PLOT_PAD = 12;
 
 // ─── PANEL COMPONENT ───────────────────────────────────────────────────────
-function SecondPanel({ context }: { context: PanelExtensionContext }): ReactElement {
+function SignalPlotPanel({ context }: { context: PanelExtensionContext }): ReactElement {
   const [topics, setTopics] = useState<undefined | Immutable<Topic[]>>();
   const [renderDone, setRenderDone] = useState<(() => void) | undefined>();
 
@@ -848,8 +848,8 @@ function SecondPanel({ context }: { context: PanelExtensionContext }): ReactElem
   );
 }
 
-export function initSecondPanel(context: PanelExtensionContext): () => void {
+export function initSignalPlotPanel (context: PanelExtensionContext): () => void {
   const root = createRoot(context.panelElement);
-  root.render(<SecondPanel context={context} />);
+  root.render(<SignalPlotPanel context={context} />);
   return () => { root.unmount(); };
 }

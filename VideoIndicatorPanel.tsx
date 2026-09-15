@@ -163,7 +163,7 @@ function VideoIndicatorPanel({ context }: { context: PanelExtensionContext }): R
 
   // Subscribe/re-subscribe whenever the selected topic changes. A single
   // context.subscribe call replaces the whole subscription list (same
-  // pattern SecondPanel already uses for its live field-sampling
+  // pattern SignalPlotPanel already uses for its live field-sampling
   // subscription), so switching topics automatically drops the old one.
   useEffect(() => {
     if (selectedTopic === "") return;

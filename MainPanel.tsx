@@ -96,7 +96,7 @@ function formatRelative(ns: number, base: number): string {
 }
 
 // ─── PANEL COMPONENT ───────────────────────────────────────────────────────
-function ExamplePanel({ context }: { context: PanelExtensionContext }): ReactElement {
+function MainPanel({ context }: { context: PanelExtensionContext }): ReactElement {
   
   const [topics, setTopics] = useState<undefined | Immutable<Topic[]>>();
   const [renderDone, setRenderDone] = useState<(() => void) | undefined>();
@@ -814,8 +814,8 @@ function ExamplePanel({ context }: { context: PanelExtensionContext }): ReactEle
   );
 }
 
-export function initExamplePanel(context: PanelExtensionContext): () => void {
+export function initMainPanel (context: PanelExtensionContext): () => void { 
   const root = createRoot(context.panelElement);
-  root.render(<ExamplePanel context={context} />);
+  root.render(<MainPanel context={context} />);
   return () => { root.unmount(); };
 }
