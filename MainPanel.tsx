@@ -604,6 +604,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
   const startPct = timeToPercent(startTime);
   const endPct = timeToPercent(endTime);
   const currentPct = timeToPercent(currentTime);
+  const existingEventNames = Array.from(new Set(annotations.map((a) => a.eventName))).sort();
 
   // ── UI (JSX) ─────────────────────────────────────────────────────────────
   return (
@@ -694,7 +695,17 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
 
       <div style={{ marginBottom: "1rem" }}>
         <label style={{ display: "block", marginBottom: "0.3rem", fontWeight: "bold" }}>Event Name (Use identical names to link sensors)</label>
-        <input type="text" value={eventName} onChange={(e) => setEventName(e.target.value)} placeholder="auto-named on save if left blank" style={{ width: "100%", padding: "0.3rem", boxSizing: "border-box" }} />
+        {/* Combobox mode: existing event names (from annotations already
+            saved this session) are suggested so you can reuse one to link
+            annotations across sensors/topics — but any typed text is still
+            a valid value, same as the field-path picker in Signal Plot. */}
+        <SearchableSelect
+          items={existingEventNames.map((name) => ({ name }))}
+          value={eventName}
+          onChange={setEventName}
+          mode="combobox"
+          placeholder="type or pick an existing name — auto-named on save if left blank"
+        />
       </div>
 
       <button onClick={handleSaveAnnotation} style={{ width: "100%", padding: "0.5rem", backgroundColor: "#338", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", marginBottom: "0.5rem", fontWeight: "bold" }}>

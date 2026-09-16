@@ -544,18 +544,19 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
         </div>
 
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-          <input
-            type="text"
-            list="field-suggestions"
-            value={pendingField}
-            onChange={(e) => setPendingField(e.target.value)}
-            placeholder={pendingTopic ? (fieldSuggestions[0] ?? "type a numeric field path, e.g. linear_acceleration.x") : "select a topic first"}
-            disabled={!pendingTopic}
-            style={{ flex: "1 1 200px", padding: "0.3rem", boxSizing: "border-box" }}
-          />
-          <datalist id="field-suggestions">
-            {fieldSuggestions.map((f) => <option key={f} value={f} />)}
-          </datalist>
+          {/* Combobox mode: field paths aren't a fixed list like topics are, so
+              arbitrary typed text must stay valid even when nothing matches the
+              suggestions (e.g. no sample message seen yet for this topic). */}
+          <div style={{ flex: "1 1 200px" }}>
+            <SearchableSelect
+              items={fieldSuggestions.map((f) => ({ name: f }))}
+              value={pendingField}
+              onChange={setPendingField}
+              mode="combobox"
+              placeholder={pendingTopic ? (fieldSuggestions[0] ?? "type a numeric field path, e.g. linear_acceleration.x") : "select a topic first"}
+              disabled={!pendingTopic}
+            />
+          </div>
 
           <button
             onClick={handleAddSeries}
