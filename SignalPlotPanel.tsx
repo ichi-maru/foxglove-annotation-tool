@@ -532,12 +532,8 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
       <h2 style={{ marginBottom: "1rem" }}>Signal Plot</h2>
 
       {/* ADD SERIES CONTROLS */}
-      <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem", flexWrap: "wrap" }}>
-        {/* Searchable/filterable topic picker — same SearchableSelect used in Main
-            Panel's topic select. Wrapped in a div carrying the flex sizing the
-            plain <select> used to have directly, since the component doesn't take
-            a style prop itself. */}
-        <div style={{ flex: "1 1 200px" }}>
+      <div style={{ marginBottom: "0.5rem" }}>
+        <div style={{ marginBottom: "0.5rem" }}>
           <SearchableSelect
             items={(topics ?? []).map((topic) => ({ name: topic.name, meta: topic.schemaName }))}
             value={pendingTopic}
@@ -547,26 +543,28 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
           />
         </div>
 
-        <input
-          type="text"
-          list="field-suggestions"
-          value={pendingField}
-          onChange={(e) => setPendingField(e.target.value)}
-          placeholder={pendingTopic ? (fieldSuggestions[0] ?? "type a numeric field path, e.g. linear_acceleration.x") : "select a topic first"}
-          disabled={!pendingTopic}
-          style={{ flex: "1 1 200px", padding: "0.3rem", boxSizing: "border-box" }}
-        />
-        <datalist id="field-suggestions">
-          {fieldSuggestions.map((f) => <option key={f} value={f} />)}
-        </datalist>
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+          <input
+            type="text"
+            list="field-suggestions"
+            value={pendingField}
+            onChange={(e) => setPendingField(e.target.value)}
+            placeholder={pendingTopic ? (fieldSuggestions[0] ?? "type a numeric field path, e.g. linear_acceleration.x") : "select a topic first"}
+            disabled={!pendingTopic}
+            style={{ flex: "1 1 200px", padding: "0.3rem", boxSizing: "border-box" }}
+          />
+          <datalist id="field-suggestions">
+            {fieldSuggestions.map((f) => <option key={f} value={f} />)}
+          </datalist>
 
-        <button
-          onClick={handleAddSeries}
-          disabled={!pendingTopic || !pendingField}
-          style={{ padding: "0.3rem 0.8rem", backgroundColor: "#338", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}
-        >
-          Add
-        </button>
+          <button
+            onClick={handleAddSeries}
+            disabled={!pendingTopic || !pendingField}
+            style={{ padding: "0.3rem 0.8rem", backgroundColor: "#338", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}
+          >
+            Add
+          </button>
+        </div>
       </div>
       {pendingTopic !== "" && fieldSuggestions.length === 0 && (
         <div style={{ fontSize: "0.75rem", color: "#888", marginBottom: "0.5rem" }}>
@@ -809,7 +807,7 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
                     {isEmpty ? "⚠" : null}
                   </div>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: "bold" }}>
+                    <div style={{ fontWeight: "bold", color: "#eee" }}>
                       {s.topic} <span style={{ color: "#aaa", fontWeight: "normal" }}>· {s.fieldPath}</span>
                     </div>
                     <div style={{ color: isEmpty ? "#e0a030" : "#888" }}>
