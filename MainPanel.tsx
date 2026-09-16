@@ -13,6 +13,8 @@ type Annotation = {
   endTime: number;        
   endTimeISO: string;
   visibleInPlot: boolean; // Opt-in: whether this annotation is published for the Signal Plot to visualize
+  category: string;       // Optional label/tag ("" = none) — pure display, doesn't touch color logic,
+                           // filtering, or the allAnnotations publish below (Main-Panel-only for now).
 };
 
 // Lightweight shape published via the "savedAnnotations" / "allAnnotations"
@@ -59,7 +61,8 @@ function isValidAnnotation(v: unknown): v is Annotation {
     typeof o.endTime === "number" &&
     Number.isFinite(o.endTime) &&
     typeof o.endTimeISO === "string" &&
-    typeof o.visibleInPlot === "boolean"
+    typeof o.visibleInPlot === "boolean" &&
+    (o.category === undefined || typeof o.category === "string") // additive field — old session files won't have it
   );
 }
 
@@ -103,6 +106,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
   const [renderDone, setRenderDone] = useState<(() => void) | undefined>();
   const [selectedTopic, setSelectedTopic] = useState<string>("");
   const [eventName, setEventName] = useState<string>("");
+  const [category, setCategory] = useState<string>(""); // pending category for the next annotation
   
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set()); // Checkbox State
@@ -375,11 +379,13 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       endTime,
       endTimeISO: new Date(endTime / 1_000_000).toISOString(),
       visibleInPlot: false, // opt-in — keeps the Signal Plot from cluttering by default
+      category,
     };
 
     setAnnotations([...annotations, newAnnotation]);
     setSelectedIds(new Set(selectedIds).add(newId)); // Auto-check the box!
     setEventName("");
+    setCategory(""); // reset, same as eventName — say the word if you'd rather this stayed sticky across saves
   }
 
   function toggleSelection(id: number) {
@@ -530,7 +536,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       // later in this session — the annotation's real identity for our
       // purposes is its name/topic/times, not this internal number.
       const base = Date.now();
-      const nextAnnotations = result.annotations.map((a, i) => ({ ...a, id: base + i }));
+      const nextAnnotations = result.annotations.map((a, i) => ({ ...a, id: base + i, category: a.category ?? "" }));
 
       setAnnotations(nextAnnotations);
       setSelectedIds(new Set());
@@ -595,7 +601,8 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
         event_name: ann.eventName,
         target_topic: ann.topic,
         start_time_ns: ann.startTime,
-        end_time_ns: ann.endTime
+        end_time_ns: ann.endTime,
+        category: ann.category
       }))
     });
   }
@@ -605,6 +612,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
   const endPct = timeToPercent(endTime);
   const currentPct = timeToPercent(currentTime);
   const existingEventNames = Array.from(new Set(annotations.map((a) => a.eventName))).sort();
+  const existingCategories = Array.from(new Set(annotations.map((a) => a.category).filter((c) => c !== ""))).sort();
 
   // ── UI (JSX) ─────────────────────────────────────────────────────────────
   return (
@@ -707,6 +715,20 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
           placeholder="type or pick an existing name — auto-named on save if left blank"
         />
       </div>
+      
+      <div style={{ marginBottom: "1rem" }}>
+        <label style={{ display: "block", marginBottom: "0.3rem", fontWeight: "bold" }}>Category (optional)</label>
+        {/* Same combobox pattern again — free-form label/tag, not a fixed
+            taxonomy. Suggestions are categories already used this session;
+            leaving it blank means no category (never auto-filled). */}
+        <SearchableSelect
+          items={existingCategories.map((name) => ({ name }))}
+          value={category}
+          onChange={setCategory}
+          mode="combobox"
+          placeholder="type or pick an existing category — optional"
+        />
+      </div>
 
       <button onClick={handleSaveAnnotation} style={{ width: "100%", padding: "0.5rem", backgroundColor: "#338", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", marginBottom: "0.5rem", fontWeight: "bold" }}>
         Save Annotation
@@ -789,6 +811,13 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
                       so it's always legible regardless of which palette color (or the grey DEFAULT_COLOR fallback) the event happens to have. */}
                   <div style={{ fontWeight: "bold", fontSize: "0.9rem", color: "#f2f2f2" }}>{ann.eventName}</div>
                   <div style={{ color: "#aaa", marginBottom: "0.2rem" }}>Topic: {ann.topic}</div>
+                  {ann.category !== "" && (
+                  <div style={{ marginBottom: "0.3rem" }}>
+                    <span style={{ display: "inline-block", padding: "0.05rem 0.45rem", fontSize: "0.72rem", color: "#ccc", backgroundColor: "#2a2a2a", border: "1px solid #555", borderRadius: "10px" }}>
+                      {ann.category}
+                    </span>
+                  </div>
+                  )}
                   {/* Start/End labels keep their green/red accent color; the timestamp VALUE next to each label gets its own explicit light color so it's
                       not the same washed-out grey it was inheriting before. */}
                   <div>
