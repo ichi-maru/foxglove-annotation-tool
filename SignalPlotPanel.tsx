@@ -1,6 +1,8 @@
 import { Immutable, PanelExtensionContext, Topic } from "@foxglove/extension";
 import { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { SearchableSelect } from "./SearchableSelect";
+
 
 // ─── SHARED HELPERS (duplicated from MainPanel.tsx on purpose, so each
 //     panel file stays self-contained. Pull these into a shared utils.ts if
@@ -531,16 +533,19 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
 
       {/* ADD SERIES CONTROLS */}
       <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.5rem", flexWrap: "wrap" }}>
-        <select
-          value={pendingTopic}
-          onChange={(e) => { setPendingTopic(e.target.value); setPendingField(""); }}
-          style={{ flex: "1 1 200px", padding: "0.3rem" }}
-        >
-          <option value="">-- Select a topic --</option>
-          {(topics ?? []).map((topic) => (
-            <option key={topic.name} value={topic.name}>{topic.name} ({topic.schemaName})</option>
-          ))}
-        </select>
+        {/* Searchable/filterable topic picker — same SearchableSelect used in Main
+            Panel's topic select. Wrapped in a div carrying the flex sizing the
+            plain <select> used to have directly, since the component doesn't take
+            a style prop itself. */}
+        <div style={{ flex: "1 1 200px" }}>
+          <SearchableSelect
+            items={(topics ?? []).map((topic) => ({ name: topic.name, meta: topic.schemaName }))}
+            value={pendingTopic}
+            onChange={(next) => { setPendingTopic(next); setPendingField(""); }}
+            mode="strict"
+            placeholder="-- search topics --"
+          />
+        </div>
 
         <input
           type="text"

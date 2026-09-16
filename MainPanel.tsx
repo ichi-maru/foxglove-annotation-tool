@@ -1,6 +1,7 @@
 import { Immutable, PanelExtensionContext, Topic } from "@foxglove/extension";
 import { ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { SearchableSelect } from "./SearchableSelect";
 
 // ─── DATA MODEL ────────────────────────────────────────────────────────────
 type Annotation = {
@@ -627,12 +628,17 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
 
       <div style={{ marginBottom: "1rem" }}>
         <label style={{ display: "block", marginBottom: "0.3rem", fontWeight: "bold" }}>Select Topic</label>
-        <select value={selectedTopic} onChange={(e) => { setSelectedTopic(e.target.value); setEventName(""); }} style={{ width: "100%", padding: "0.3rem" }}>
-          <option value="">-- Select a topic --</option>
-          {(topics ?? []).map((topic) => (
-            <option key={topic.name} value={topic.name}>{topic.name} ({topic.schemaName})</option>
-          ))}
-        </select>
+        {/* Searchable/filterable topic picker — replaces the plain <select>.
+            "strict" mode: only an existing topic can be committed; typing just
+            filters the list down. See SearchableSelect.tsx for the full
+            interaction behavior (keyboard nav, click-outside, empty state). */}
+        <SearchableSelect
+          items={(topics ?? []).map((topic) => ({ name: topic.name, meta: topic.schemaName }))}
+          value={selectedTopic}
+          onChange={(next) => { setSelectedTopic(next); setEventName(""); }}
+          mode="strict"
+          placeholder="-- search topics --"
+        />
       </div>
 
       <div style={{ marginBottom: "0.5rem", fontWeight: "bold" }}>Event span</div>
@@ -767,10 +773,21 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
                   style={{ transform: "scale(1.3)", cursor: "pointer", margin: "0 0.5rem" }}
                 />
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: "bold", fontSize: "0.9rem" }}>{ann.eventName}</div>
+                  {/* Event name: explicit light color instead of inheriting the page's default text color, which read as grey-on-grey against the dark
+                      row background (#1e1e1e). The color swatch button to the left is what carries the event's assigned color — this text stays neutral
+                      so it's always legible regardless of which palette color (or the grey DEFAULT_COLOR fallback) the event happens to have. */}
+                  <div style={{ fontWeight: "bold", fontSize: "0.9rem", color: "#f2f2f2" }}>{ann.eventName}</div>
                   <div style={{ color: "#aaa", marginBottom: "0.2rem" }}>Topic: {ann.topic}</div>
-                  <div><span style={{ color: "#2a7", fontWeight: "bold" }}>Start:</span> {ann.startTimeISO.split('T')[1]}</div>
-                  <div><span style={{ color: "#e74", fontWeight: "bold" }}>End:</span> {ann.endTimeISO.split('T')[1]}</div>
+                  {/* Start/End labels keep their green/red accent color; the timestamp VALUE next to each label gets its own explicit light color so it's
+                      not the same washed-out grey it was inheriting before. */}
+                  <div>
+                    <span style={{ color: "#2a7", fontWeight: "bold" }}>Start:</span>{" "}
+                    <span style={{ color: "#ccc" }}>{ann.startTimeISO.split('T')[1]}</span>
+                  </div>
+                  <div>
+                    <span style={{ color: "#e74", fontWeight: "bold" }}>End:</span>{" "}
+                    <span style={{ color: "#ccc" }}>{ann.endTimeISO.split('T')[1]}</span>
+                  </div>
                 </div>
                 <button
                   onClick={() => toggleVisibleInPlot(ann.id)}
