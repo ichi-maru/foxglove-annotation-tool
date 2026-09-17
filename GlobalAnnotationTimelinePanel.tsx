@@ -178,6 +178,16 @@ function GlobalAnnotationTimelinePanel({ context }: { context: PanelExtensionCon
   const svgRef = useRef<SVGSVGElement | null>(null);
   const isDraggingRef = useRef(false);
   const lastSeekRef = useRef(0);
+  // Root of the whole panel — the hover tooltip below is positioned
+  // relative to THIS (not the scrollable lane box), specifically so it can
+  // render outside that box's clipping bounds. See handlePlotPointerMove.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  // Cursor position (relative to panelRef), captured on hover — the
+  // tooltip below follows the cursor rather than being anchored to the
+  // lane's time position, so it's never clipped by the lane box's own
+  // overflow-y:auto (it used to be a child of that box and got cut off at
+  // the top/bottom edges).
+  const [hoverClientPos, setHoverClientPos] = useState<{ x: number; y: number } | null>(null);
 
   function clientPosToViewBox(clientX: number, clientY: number): { x: number; y: number } | undefined {
     const svg = svgRef.current;
@@ -216,6 +226,11 @@ function GlobalAnnotationTimelinePanel({ context }: { context: PanelExtensionCon
     const pos = clientPosToViewBox(e.clientX, e.clientY);
     setHoveredId(pos ? findLaneIdAt(pos.x, pos.y) : null);
 
+    if (panelRef.current) {
+      const panelRect = panelRef.current.getBoundingClientRect();
+      setHoverClientPos({ x: e.clientX - panelRect.left, y: e.clientY - panelRect.top });
+    }
+
     if (!pos) return;
     const t = xToTime(pos.x);
     if (t == undefined) return;
@@ -238,13 +253,14 @@ function GlobalAnnotationTimelinePanel({ context }: { context: PanelExtensionCon
   function handlePlotPointerLeave() {
     if (!isDraggingRef.current) previewAt(undefined);
     setHoveredId(null);
+    setHoverClientPos(null);
   }
 
   const hoveredLane = hoveredId != null ? lanes.find((l) => l.id === hoveredId) ?? null : null;
 
   // ── UI (JSX) ─────────────────────────────────────────────────────────────
   return (
-    <div style={{ padding: "1rem", fontFamily: "sans-serif", height: "100%", boxSizing: "border-box", overflowY: "auto", display: "flex", flexDirection: "column" }}>
+    <div ref={panelRef} style={{ padding: "1rem", fontFamily: "sans-serif", height: "100%", boxSizing: "border-box", overflowY: "auto", display: "flex", flexDirection: "column", position: "relative" }}>
       <h2 style={{ marginBottom: "0.25rem" }}>Global Annotation Timeline</h2>
       <div style={{ fontSize: "0.78rem", color: "#888", marginBottom: "1rem" }}>
         Every saved annotation, one permanent lane each in save order. Read-only — click or drag to seek, hover a
@@ -261,19 +277,29 @@ function GlobalAnnotationTimelinePanel({ context }: { context: PanelExtensionCon
         </div>
       ) : (
         <>
-          <div
-            style={{
-              position: "relative",
-              border: "1px solid #444",
-              borderRadius: "6px",
-              backgroundColor: "#222",
-              overflowX: "hidden",
-              overflowY: "auto",
-              maxHeight: `${containerMaxHeight}px`,
-              marginBottom: "0.4rem",
-            }}
-          >
-            <svg
+          {/* Outer wrapper handles HORIZONTAL overflow: the inner box
+              below has a minWidth floor so its text can never be scaled
+              down past legibility (the "blurred when shrunk" bug) — when
+              the panel is narrower than that floor, this wrapper scrolls
+              sideways instead of squeezing the SVG. */}
+          <div style={{ overflowX: "auto", marginBottom: "0.4rem" }}>
+            <div
+              style={{
+                position: "relative",
+                border: "1px solid #444",
+                borderRadius: "6px",
+                backgroundColor: "#222",
+                overflowY: "auto",
+                maxHeight: `${containerMaxHeight}px`,
+                // Never render narrower than the SVG's native viewBox
+                // width — below that, text drawn at a fixed viewBox font
+                // size (e.g. the lane labels' fontSize:"10px") starts
+                // rendering smaller than its authored size and gets
+                // blurry, since the whole SVG scales down with it.
+                minWidth: `${PLOT_W}px`,
+              }}
+            >
+              <svg
               ref={svgRef}
               viewBox={`0 0 ${PLOT_W} ${totalHeight}`}
               preserveAspectRatio="none"
@@ -330,32 +356,7 @@ function GlobalAnnotationTimelinePanel({ context }: { context: PanelExtensionCon
                 </g>
               )}
             </svg>
-
-            {hoveredLane && (
-              <div
-                style={{
-                  position: "absolute",
-                  left: `${((timeToX(hoveredLane.startTime) + timeToX(hoveredLane.endTime)) / 2 / PLOT_W) * 100}%`,
-                  top: `${RULER_H + hoveredLane.lane * (LANE_H + LANE_GAP) + LANE_H + 4}px`,
-                  transform: "translateX(-50%)",
-                  backgroundColor: "#1e1e1e",
-                  border: `1px solid ${hoveredLane.color}`,
-                  borderRadius: "4px",
-                  padding: "0.4rem 0.6rem",
-                  fontSize: "0.72rem",
-                  whiteSpace: "nowrap",
-                  pointerEvents: "none",
-                  boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
-                  zIndex: 5,
-                }}
-              >
-                <div style={{ fontWeight: "bold", color: hoveredLane.color }}>{hoveredLane.eventName}</div>
-                <div style={{ color: "#aaa" }}>{hoveredLane.topic}</div>
-                <div>
-                  {formatRelative(hoveredLane.startTime, recStart!)} → {formatRelative(hoveredLane.endTime, recStart!)}
-                </div>
-              </div>
-            )}
+            </div>
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#888", marginBottom: "0.25rem" }}>
@@ -368,6 +369,36 @@ function GlobalAnnotationTimelinePanel({ context }: { context: PanelExtensionCon
       <div style={{ fontSize: "0.75rem", color: "#888", minHeight: "1em" }}>
         {haveRange && !canSeek ? "Click-to-seek isn't supported for this data source." : null}
       </div>
+
+      {/* Hover tooltip — rendered here, as a direct child of the whole
+          panel (not nested inside the scrollable lane box above), and
+          positioned from the cursor's position within the panel rather
+          than the lane's time-position. That's what lets it render
+          outside the lane box's own overflow-y:auto clipping. */}
+      {hoveredLane && hoverClientPos && (
+        <div
+          style={{
+            position: "absolute",
+            left: `${hoverClientPos.x + 14}px`,
+            top: `${hoverClientPos.y + 14}px`,
+            backgroundColor: "#1e1e1e",
+            border: `1px solid ${hoveredLane.color}`,
+            borderRadius: "4px",
+            padding: "0.4rem 0.6rem",
+            fontSize: "0.72rem",
+            whiteSpace: "nowrap",
+            pointerEvents: "none",
+            boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+            zIndex: 5,
+          }}
+        >
+          <div style={{ fontWeight: "bold", color: hoveredLane.color }}>{hoveredLane.eventName}</div>
+          <div style={{ color: "#aaa" }}>{hoveredLane.topic}</div>
+          <div>
+            {formatRelative(hoveredLane.startTime, recStart!)} → {formatRelative(hoveredLane.endTime, recStart!)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
