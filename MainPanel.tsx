@@ -1,5 +1,5 @@
 import { Immutable, PanelExtensionContext, Topic, VariableValue } from "@foxglove/extension";
-import { ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { SearchableSelect } from "./SearchableSelect";
 
@@ -8,6 +8,13 @@ type Annotation = {
   id: number;             // Unique ID for the checkbox system
   eventName: string;
   topic: string;
+  fieldPath: string;      // Which numeric field within the topic's message this event
+                           // is about (e.g. "linear_acceleration.x") — required going
+                           // forward for newly created annotations, but "" is accepted
+                           // on import from a pre-existing session file that predates
+                           // this field (additive field, same treatment category got).
+                           // Metadata only: the MCAP Slicer still slices whole
+                           // messages/topics, never individual fields.
   startTime: number;      
   startTimeISO: string;   
   endTime: number;        
@@ -62,7 +69,8 @@ function isValidAnnotation(v: unknown): v is Annotation {
     Number.isFinite(o.endTime) &&
     typeof o.endTimeISO === "string" &&
     typeof o.visibleInPlot === "boolean" &&
-    (o.category === undefined || typeof o.category === "string") // additive field — old session files won't have it
+    (o.category === undefined || typeof o.category === "string") && // additive field — old session files won't have it
+    (o.fieldPath === undefined || typeof o.fieldPath === "string") // additive field — same treatment as category
   );
 }
 
@@ -110,6 +118,29 @@ function formatRelative(ns: number, base: number): string {
   return `${minutes}:${padLeft(seconds.toFixed(3), 6, "0")}`;
 }
 
+// ─── FIELD-PATH HELPER (duplicated from SignalPlotPanel.tsx on purpose —
+//     see that file's header comment for why each panel stays
+//     self-contained) ───────────────────────────────────────────────────────
+// Walks a sample message and returns dot-notation paths to every numeric
+// leaf, so the Sensor Field input can suggest them — same function as
+// Signal Plot's, used the same way.
+function discoverNumericPaths(obj: unknown, prefix = "", depth = 0, out: string[] = []): string[] {
+  if (obj == null || typeof obj !== "object" || Array.isArray(obj) || ArrayBuffer.isView(obj as ArrayBufferView)) {
+    return out;
+  }
+  if (depth > 4 || out.length > 60) return out;
+  for (const key of Object.keys(obj as Record<string, unknown>)) {
+    const val = (obj as Record<string, unknown>)[key];
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (typeof val === "number") {
+      out.push(path);
+    } else if (typeof val === "object" && val != null) {
+      discoverNumericPaths(val, path, depth + 1, out);
+    }
+  }
+  return out;
+}
+
 // ─── PANEL COMPONENT ───────────────────────────────────────────────────────
 function MainPanel({ context }: { context: PanelExtensionContext }): ReactElement {
   
@@ -117,7 +148,48 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
   const [renderDone, setRenderDone] = useState<(() => void) | undefined>();
   const [selectedTopic, setSelectedTopic] = useState<string>("");
   const [eventName, setEventName] = useState<string>("");
+  const [fieldPath, setFieldPath] = useState<string>(""); // pending Sensor Field for the next annotation — required, unlike category
   const [category, setCategory] = useState<string>(""); // pending category for the next annotation
+
+  // Shown as an in-page banner instead of alert() for one-way messages
+  // (import/export errors, load results) — NOT the Save Annotation
+  // required-field check, which has its own dedicated saveWarning banner
+  // right next to that button instead (see below). NOT a native blocking
+  // dialog on purpose: Electron has a longstanding, upstream-confirmed bug
+  // where alert()/confirm() can leave the renderer's focus/pointer-event
+  // routing stuck afterward — dropdowns silently stop responding to clicks
+  // until the window loses and regains OS focus (e.g. switching tabs and
+  // back). See https://github.com/electron/electron/issues/19977 and
+  // https://github.com/electron/electron/issues/40212, both confirmed by
+  // an Electron maintainer. An in-page element has no such dialog, so no
+  // such focus loss. Cleared automatically the next time a new notice is
+  // shown, or manually via the banner's own dismiss button.
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Dedicated to the Save Annotation required-field check specifically —
+  // shown right above that button rather than in the shared notice banner
+  // at the top of the panel, since this one is inline validation tied to
+  // a specific action the user is looking at right when it fires, not a
+  // general result/error the user might see from anywhere in the panel.
+  const [saveWarning, setSaveWarning] = useState<string | null>(null);
+
+  // Replaces window.confirm() for the two sites that need the user to
+  // actually choose (Remove Annotation, Load Session over existing
+  // annotations) — same Electron bug as above, but confirm() can't just
+  // become a banner since the calling code depends on a synchronous
+  // true/false return, which an in-page element can't give. Instead the
+  // action to run on confirmation is stashed here and invoked from the
+  // banner's own OK button; Cancel (or dismissing) just clears this
+  // without running anything.
+  const [pendingConfirm, setPendingConfirm] = useState<{ message: string; onConfirm: () => void } | null>(null);
+
+  // Live samples, keyed by topic — used only to auto-suggest numeric field
+  // paths for whichever topic is currently selected. Same pattern as Signal
+  // Plot's own latestByTopic, kept independent (Option A: Main Panel
+  // discovers fields itself rather than reading them from Signal Plot) so
+  // Sensor Field suggestions work regardless of whether Signal Plot is even
+  // open, and always match whatever topic THIS panel currently has selected.
+  const [latestByTopic, setLatestByTopic] = useState<Record<string, unknown>>({});
   
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set()); // Checkbox State
@@ -188,6 +260,20 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
         const rawSeries = renderState.variables.get("signalPlotSeries");
         setLastKnownSignalPlotSeries(Array.isArray(rawSeries) ? rawSeries : []);
       }
+
+      // Sample messages for whichever topic is currently subscribed (see
+      // the "SENSOR FIELD DISCOVERY" effect below) so Sensor Field
+      // suggestions can be derived from real message content — same
+      // fold-into-record pattern Signal Plot uses for its own
+      // latestByTopic.
+      if (renderState.currentFrame != undefined && renderState.currentFrame.length > 0) {
+        const frame = renderState.currentFrame;
+        setLatestByTopic((prev) => {
+          const next = { ...prev };
+          for (const ev of frame) next[ev.topic] = ev.message;
+          return next;
+        });
+      }
     };
 
     context.watch("topics");
@@ -196,8 +282,23 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
     context.watch("startTime");
     context.watch("endTime");
     context.watch("variables");
-    context.subscribe([]);
   }, [context]);
+
+  // ── SENSOR FIELD DISCOVERY ──
+  // Live-subscribes to whichever topic is currently selected, so a message
+  // can be sampled and its numeric fields suggested for "Sensor Field" —
+  // same pattern as Signal Plot's own pendingTopic subscription effect.
+  // Separate from the FOXGLOVE SETUP effect above (which only runs once,
+  // on mount) since this needs to re-subscribe every time selectedTopic
+  // changes.
+  useEffect(() => {
+    context.subscribe(selectedTopic ? [{ topic: selectedTopic }] : []);
+  }, [context, selectedTopic]);
+
+  const fieldSuggestions = useMemo(() => {
+    const sample = selectedTopic ? latestByTopic[selectedTopic] : undefined;
+    return sample ? discoverNumericPaths(sample) : [];
+  }, [selectedTopic, latestByTopic]);
 
   useEffect(() => { renderDone?.(); }, [renderDone]);
 
@@ -393,10 +494,11 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
   }
 
   function handleSaveAnnotation() {
-    if (selectedTopic === "" || startTime == undefined || endTime == undefined) {
-      alert("Please select a topic and set a start/end span on the timeline.");
+    if (selectedTopic === "" || fieldPath === "" || startTime == undefined || endTime == undefined) {
+      setSaveWarning("Please select a topic, a sensor field, and set a start/end span on the timeline.");
       return;
     }
+    setSaveWarning(null); // clear any earlier warning now that the save is actually going through
     
     const finalName = eventName !== "" ? eventName : `event_${annotations.length}/${selectedTopic.replace(/^\//, "")}`;
     const newId = Date.now();
@@ -406,6 +508,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       id: newId,
       eventName: finalName,
       topic: selectedTopic,
+      fieldPath,
       startTime,
       startTimeISO: new Date(startTime / 1_000_000).toISOString(),
       endTime,
@@ -418,6 +521,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
     setSelectedIds(new Set(selectedIds).add(newId)); // Auto-check the box!
     setEventName("");
     setCategory(""); // reset, same as eventName — say the word if you'd rather this stayed sticky across saves
+    setFieldPath(""); // reset too — a leftover field path from this annotation shouldn't silently carry into the next one
   }
 
   function toggleSelection(id: number) {
@@ -433,12 +537,16 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
   function handleRemoveAnnotation(id: number) {
     const target = annotations.find((a) => a.id === id);
     const label = target ? `"${target.eventName}"` : "this annotation";
-    if (!window.confirm(`Remove ${label}? This can't be undone.`)) return;
-    setAnnotations((prev) => prev.filter((a) => a.id !== id));
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
+    setPendingConfirm({
+      message: `Remove ${label}? This can't be undone.`,
+      onConfirm: () => {
+        setAnnotations((prev) => prev.filter((a) => a.id !== id));
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      },
     });
   }
 
@@ -546,25 +654,36 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
     if (!file) return;
 
     if (annotations.length > 0) {
-      const ok = window.confirm(
-        `Loading a session will replace all ${annotations.length} current annotation(s). This can't be undone. Continue?`
-      );
-      if (!ok) return;
+      setPendingConfirm({
+        message: `Loading a session will replace all ${annotations.length} current annotation(s). This can't be undone. Continue?`,
+        onConfirm: () => processSessionFile(file),
+      });
+      return;
     }
 
+    processSessionFile(file);
+  }
+
+  // The actual file-read-and-apply logic, split out from
+  // handleImportFileChange so it can be invoked either immediately (no
+  // existing annotations to lose) or from the pendingConfirm banner's OK
+  // button (existing annotations present) — same behavior as before this
+  // file's window.confirm() was replaced, just no longer gated by a
+  // synchronous return value.
+  function processSessionFile(file: File) {
     const reader = new FileReader();
     reader.onload = () => {
       let parsed: unknown;
       try {
         parsed = JSON.parse(typeof reader.result === "string" ? reader.result : "");
       } catch {
-        alert("Couldn't read that file as JSON — nothing was loaded.");
+        setNotice("Couldn't read that file as JSON — nothing was loaded.");
         return;
       }
 
       const result = parseSessionFile(parsed);
       if (!result) {
-        alert("This file doesn't look like a valid annotation session — nothing was loaded.");
+        setNotice("This file doesn't look like a valid annotation session — nothing was loaded.");
         return;
       }
 
@@ -572,7 +691,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       // later in this session — the annotation's real identity for our
       // purposes is its name/topic/times, not this internal number.
       const base = Date.now();
-      const nextAnnotations = result.annotations.map((a, i) => ({ ...a, id: base + i, category: a.category ?? "" }));
+      const nextAnnotations = result.annotations.map((a, i) => ({ ...a, id: base + i, category: a.category ?? "", fieldPath: a.fieldPath ?? "" }));
 
       setAnnotations(nextAnnotations);
       setSelectedIds(new Set());
@@ -595,9 +714,11 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       });
 
       if (result.droppedCount > 0) {
-        alert(
+        setNotice(
           `Loaded ${nextAnnotations.length} annotation(s). ${result.droppedCount} entr${result.droppedCount === 1 ? "y was" : "ies were"} skipped for being malformed.`
         );
+      } else {
+        setNotice(null); // clear any earlier notice (e.g. a previous failed load) now that this one succeeded cleanly
       }
 
       // One-shot command for Signal Plot, fired on EVERY load — including an
@@ -617,7 +738,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
         loadId: Date.now(),
       });
     };
-    reader.onerror = () => alert("Couldn't read that file — nothing was loaded.");
+    reader.onerror = () => setNotice("Couldn't read that file — nothing was loaded.");
     reader.readAsText(file);
   }
 
@@ -635,7 +756,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
 
   function handleExportJSON() {
     const selected = annotations.filter(a => selectedIds.has(a.id));
-    if (selected.length === 0) return alert("Select at least one annotation.");
+    if (selected.length === 0) { setNotice("Select at least one annotation."); return; }
     triggerDownload(`annotations_standard_${Date.now()}.json`, {
       exportedAt: new Date().toISOString(),
       totalAnnotations: selected.length,
@@ -645,7 +766,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
 
   function handleExportMCAPConfig() {
     const selected = annotations.filter(a => selectedIds.has(a.id));
-    if (selected.length === 0) return alert("Select at least one annotation.");
+    if (selected.length === 0) { setNotice("Select at least one annotation."); return; }
     triggerDownload(`mcap_slicer_config_${Date.now()}.json`, {
       instructions: "Run this JSON through the Python MCAP Slicer script.",
       input_mcap: "YOUR_INPUT_FILE.mcap",
@@ -653,6 +774,8 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       slice_windows: selected.map(ann => ({
         event_name: ann.eventName,
         target_topic: ann.topic,
+        field_path: ann.fieldPath, // metadata only — the slicer still cuts the whole message/topic, this just
+                                    // records which specific field the annotator was actually looking at
         start_time_ns: ann.startTime,
         end_time_ns: ann.endTime,
         category: ann.category
@@ -669,8 +792,32 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
 
   // ── UI (JSX) ─────────────────────────────────────────────────────────────
   return (
-    <div style={{ padding: "1rem", fontFamily: "sans-serif", height: "100%", boxSizing: "border-box", overflowY: "auto", display: "flex", flexDirection: "column", userSelect: "none" }}>
+    <div style={{ height: "100%", boxSizing: "border-box", position: "relative" }}>
+      <div style={{ padding: "1rem", fontFamily: "sans-serif", height: "100%", boxSizing: "border-box", overflowY: "auto", display: "flex", flexDirection: "column", userSelect: "none" }}>
       <h2 style={{ marginBottom: "1rem" }}>Ultimate Annotator — Timeline & MCAP</h2>
+
+      {/* In-page replacement for window.confirm()/alert() — see the
+          pendingConfirm/notice state declarations above for why. notice
+          (the non-modal banner) stays inline here, inside the scrolling
+          content — it's a passive message, not something that needs to
+          block interaction. pendingConfirm itself renders OUTSIDE this
+          inner scrolling div (see below, as a sibling against the OUTER
+          non-scrolling frame) — it used to be nested here too, but inset:0
+          against a position:relative ancestor sizes to that ancestor's OWN
+          box, not its scrolled content height; since this div is the one
+          that scrolls (overflowY:auto), an overlay nested inside it only
+          ever covered the panel's visible viewport-height, leaving
+          anything below the fold (e.g. a long Saved Annotations list)
+          outside the dimmed/blocked region and still clickable. Anchoring
+          it instead to the outer frame — which has a fixed height and
+          never scrolls — makes inset:0 match the panel's true full bounds
+          every time, regardless of how tall the content inside is. */}
+      {pendingConfirm == null && notice != null && (
+        <div style={{ marginBottom: "1rem", padding: "0.5rem 0.6rem", fontSize: "0.8rem", color: "#e0a030", backgroundColor: "#2a2010", border: "1px solid #7a5a1a", borderRadius: "4px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
+          <span>{notice}</span>
+          <a onClick={() => setNotice(null)} style={{ color: "#e0a030", cursor: "pointer", flexShrink: 0, fontWeight: "bold" }}>✕</a>
+        </div>
+      )}
 
       {/* SESSION SAVE / LOAD */}
       <div style={{ marginBottom: "1rem", paddingBottom: "1rem", borderBottom: "1px solid #444" }}>
@@ -697,9 +844,30 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
         <SearchableSelect
           items={(topics ?? []).map((topic) => ({ name: topic.name, meta: topic.schemaName }))}
           value={selectedTopic}
-          onChange={(next) => { setSelectedTopic(next); setEventName(""); }}
+          onChange={(next) => { setSelectedTopic(next); setEventName(""); setFieldPath(""); }}
           mode="strict"
           placeholder="-- search topics --"
+        />
+      </div>
+
+      <div style={{ marginBottom: "1rem" }}>
+        <label style={{ display: "block", marginBottom: "0.3rem", fontWeight: "bold" }}>Sensor Field</label>
+        {/* Required, unlike Category below — an annotation is about a specific
+            numeric field within the topic's message (e.g.
+            "linear_acceleration.x"), not the topic as a whole. Suggestions
+            come from a message actually sampled on the selected topic (see
+            the "SENSOR FIELD DISCOVERY" subscription effect above) — same
+            combobox pattern as Event Name/Category, so typing still works
+            even before any suggestions have loaded. Cleared whenever the
+            topic changes, since a field path from a different topic's
+            schema is meaningless here. */}
+        <SearchableSelect
+          items={fieldSuggestions.map((f) => ({ name: f }))}
+          value={fieldPath}
+          onChange={setFieldPath}
+          mode="combobox"
+          placeholder={selectedTopic ? (fieldSuggestions[0] ?? "type a numeric field path, e.g. linear_acceleration.x") : "select a topic first"}
+          disabled={!selectedTopic}
         />
       </div>
 
@@ -783,6 +951,13 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
         />
       </div>
 
+      {saveWarning != null && (
+        <div style={{ marginBottom: "0.5rem", padding: "0.5rem 0.6rem", fontSize: "0.8rem", color: "#e0a030", backgroundColor: "#2a2010", border: "1px solid #7a5a1a", borderRadius: "4px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
+          <span>{saveWarning}</span>
+          <a onClick={() => setSaveWarning(null)} style={{ color: "#e0a030", cursor: "pointer", flexShrink: 0, fontWeight: "bold" }}>✕</a>
+        </div>
+      )}
+
       <button onClick={handleSaveAnnotation} style={{ width: "100%", padding: "0.5rem", backgroundColor: "#338", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", marginBottom: "0.5rem", fontWeight: "bold" }}>
         Save Annotation
       </button>
@@ -864,6 +1039,9 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
                       so it's always legible regardless of which palette color (or the grey DEFAULT_COLOR fallback) the event happens to have. */}
                   <div style={{ fontWeight: "bold", fontSize: "0.9rem", color: "#f2f2f2" }}>{ann.eventName}</div>
                   <div style={{ color: "#aaa", marginBottom: "0.2rem" }}>Topic: {ann.topic}</div>
+                  {ann.fieldPath !== "" && (
+                    <div style={{ color: "#aaa", marginBottom: "0.2rem" }}>Field: <span style={{ color: "#8ab4ff" }}>{ann.fieldPath}</span></div>
+                  )}
                   {ann.category !== "" && (
                   <div style={{ marginBottom: "0.3rem" }}>
                     <span style={{ display: "inline-block", padding: "0.05rem 0.45rem", fontSize: "0.72rem", color: "#ccc", backgroundColor: "#2a2a2a", border: "1px solid #555", borderRadius: "10px" }}>
@@ -920,6 +1098,40 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
           Export MCAP Config
         </button>
       </div>
+      </div>
+
+      {pendingConfirm != null && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            backgroundColor: "rgba(0, 0, 0, 0.6)",
+            display: "flex",
+            alignItems: "flex-start",
+            justifyContent: "center",
+            paddingTop: "3rem",
+            zIndex: 100,
+          }}
+        >
+          <div style={{ width: "85%", maxWidth: "420px", padding: "0.8rem 0.9rem", fontSize: "0.85rem", color: "#f2f2f2", backgroundColor: "#2a1e1e", border: "1px solid #822", borderRadius: "6px", boxShadow: "0 4px 16px rgba(0,0,0,0.5)" }}>
+            <div style={{ marginBottom: "0.6rem" }}>{pendingConfirm.message}</div>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <button
+                onClick={() => { pendingConfirm.onConfirm(); setPendingConfirm(null); }}
+                style={{ flex: 1, padding: "0.4rem", backgroundColor: "#822", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontWeight: "bold", fontSize: "0.8rem" }}
+              >
+                OK
+              </button>
+              <button
+                onClick={() => setPendingConfirm(null)}
+                style={{ flex: 1, padding: "0.4rem", backgroundColor: "#555", color: "white", border: "none", borderRadius: "4px", cursor: "pointer", fontSize: "0.8rem" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
