@@ -1,4 +1,4 @@
-import { Immutable, PanelExtensionContext, Topic } from "@foxglove/extension";
+import { Immutable, PanelExtensionContext, Topic, VariableValue } from "@foxglove/extension";
 import { ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { SearchableSelect } from "./SearchableSelect";
@@ -71,7 +71,17 @@ function isValidEventColors(v: unknown): v is Record<string, string> {
   return Object.values(v as Record<string, unknown>).every((c) => typeof c === "string");
 }
 
-type ParsedSession = { annotations: Annotation[]; eventColors: Record<string, string>; droppedCount: number };
+type ParsedSession = {
+  annotations: Annotation[];
+  eventColors: Record<string, string>;
+  droppedCount: number;
+  // Signal Plot's series list, round-tripped opaquely — Main Panel doesn't
+  // understand series internals, it just shallow-validates "is this an
+  // array" (same treatment as eventColors above) and hands the raw entries
+  // to Signal Plot via signalPlotLoadCommand, which does its own full
+  // per-entry validation independently. See handover §4.
+  signalPlotSeries: unknown[];
+};
 
 function parseSessionFile(parsed: unknown): ParsedSession | null {
   if (parsed == null || typeof parsed !== "object") return null;
@@ -81,7 +91,8 @@ function parseSessionFile(parsed: unknown): ParsedSession | null {
   const droppedCount = obj.annotations.length - validAnnotations.length;
   if (validAnnotations.length === 0 && obj.annotations.length > 0) return null; // every entry malformed — likely the wrong file entirely
   const eventColors = isValidEventColors(obj.eventColors) ? obj.eventColors : {};
-  return { annotations: validAnnotations, eventColors, droppedCount };
+  const signalPlotSeries = Array.isArray(obj.signalPlotSeries) ? obj.signalPlotSeries : [];
+  return { annotations: validAnnotations, eventColors, droppedCount, signalPlotSeries };
 }
 
 function timeToNanos(t: { sec: number; nsec: number }): number {
@@ -110,6 +121,15 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
   
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set()); // Checkbox State
+
+  // Last-seen value of the "signalPlotSeries" global variable, published
+  // continuously by Signal Plot (mirrors how Signal Plot already reads
+  // "savedAnnotations"/"allAnnotations" published by this panel — this is
+  // the reverse direction). Kept loosely typed on purpose: Main Panel only
+  // needs to round-trip this into/out of the saved session file, not
+  // understand series internals. Only shallow-validated as "is it an
+  // array", same as other passthrough session data.
+  const [lastKnownSignalPlotSeries, setLastKnownSignalPlotSeries] = useState<unknown[]>([]);
 
   // Per-event-name color, keyed so the same event name always gets the same
   // color even across different topics (e.g. "layer_shift" on both an IMU
@@ -158,6 +178,16 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       if (renderState.startTime != undefined) setRecStart(timeToNanos(renderState.startTime));
       if (renderState.endTime != undefined) setRecEnd(timeToNanos(renderState.endTime));
       if (renderState.currentTime != undefined) setCurrentTime(timeToNanos(renderState.currentTime));
+
+      // First time this panel reads a global variable rather than only
+      // writing one — Signal Plot continuously publishes its own series
+      // list here so a session save can capture it. Shallow "is it an
+      // array" validation only; Signal Plot re-validates fully on its own
+      // side whenever it reads this same data back via signalPlotLoadCommand.
+      if (renderState.variables != undefined) {
+        const rawSeries = renderState.variables.get("signalPlotSeries");
+        setLastKnownSignalPlotSeries(Array.isArray(rawSeries) ? rawSeries : []);
+      }
     };
 
     context.watch("topics");
@@ -165,6 +195,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
     context.watch("currentTime");
     context.watch("startTime");
     context.watch("endTime");
+    context.watch("variables");
     context.subscribe([]);
   }, [context]);
 
@@ -221,6 +252,7 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       context.setVariable("annotationEndTimeNs", undefined);
       context.setVariable("savedAnnotations", undefined);
       context.setVariable("allAnnotations", undefined);
+      context.setVariable("signalPlotLoadCommand", undefined);
     };
   }, [context]);
 
@@ -497,6 +529,10 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
       savedAt: new Date().toISOString(),
       annotations,
       eventColors,
+      // Whatever Signal Plot last published, round-tripped opaquely. Only
+      // present if Signal Plot was open at some point this session — see
+      // handover §4 "Accepted limitation".
+      signalPlotSeries: lastKnownSignalPlotSeries,
     });
   }
 
@@ -563,6 +599,23 @@ function MainPanel({ context }: { context: PanelExtensionContext }): ReactElemen
           `Loaded ${nextAnnotations.length} annotation(s). ${result.droppedCount} entr${result.droppedCount === 1 ? "y was" : "ies were"} skipped for being malformed.`
         );
       }
+
+      // One-shot command for Signal Plot, fired on EVERY load — including an
+      // empty array — so loading an older, plot-less session correctly
+      // clears Signal Plot's series rather than leaving stale ones behind.
+      // loadId lets Signal Plot distinguish "a fresh load just happened"
+      // from "the variable still holds whatever was last written" (e.g. on
+      // a later panel reopen after the user has since edited their series
+      // by hand) — Signal Plot only acts when loadId is new.
+      // Cast needed here only: result.signalPlotSeries came straight out of
+      // JSON.parse (via parseSessionFile's shallow Array.isArray check), so
+      // it's always JSON-safe and satisfies VariableValue structurally —
+      // TS just can't verify that through the deliberately-loose `unknown[]`
+      // type this panel uses for series it doesn't understand.
+      context.setVariable("signalPlotLoadCommand", {
+        series: result.signalPlotSeries as VariableValue[],
+        loadId: Date.now(),
+      });
     };
     reader.onerror = () => alert("Couldn't read that file — nothing was loaded.");
     reader.readAsText(file);

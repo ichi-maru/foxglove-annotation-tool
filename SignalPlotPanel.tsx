@@ -1,4 +1,4 @@
-import { Immutable, PanelExtensionContext, Topic } from "@foxglove/extension";
+import { Immutable, PanelExtensionContext, Topic, VariableValue } from "@foxglove/extension";
 import { ReactElement, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { SearchableSelect } from "./SearchableSelect";
@@ -127,6 +127,33 @@ function isSavedAnnotation(value: unknown): value is SavedAnnotation {
   );
 }
 
+// A persisted series entry, as round-tripped opaquely through Main Panel's
+// saved session file and read back via the "signalPlotLoadCommand" global
+// variable. Main Panel only shallow-validates "is it an array" on its side
+// (see parseSessionFile), so this panel does full per-entry validation
+// independently, same split as isSavedAnnotation above. Only the fields
+// this panel actually needs to restore a series are checked — `id` is
+// deliberately NOT required here since restored series get a freshly
+// generated id anyway (see applyLoadedSeries), so an id collision with a
+// live-created series is never possible.
+type PersistedSeries = {
+  topic: string;
+  fieldPath: string;
+  color: string;
+  visible: boolean;
+};
+
+function isValidPersistedSeries(value: unknown): value is PersistedSeries {
+  if (value == null || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    typeof v.topic === "string" &&
+    typeof v.fieldPath === "string" &&
+    typeof v.color === "string" &&
+    typeof v.visible === "boolean"
+  );
+}
+
 const COLORS = ["#3388ff", "#ee7744", "#2aa77a", "#ffd54a", "#b388ff", "#ff6ec7"];
 
 const PLOT_W = 1000;
@@ -141,6 +168,26 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
   const [recStart, setRecStart] = useState<number | undefined>();
   const [recEnd, setRecEnd] = useState<number | undefined>();
   const [currentTime, setCurrentTime] = useState<number | undefined>();
+
+  // Mirrors of recStart/recEnd, kept in sync every render via the effect
+  // below. This exists because ensureRangeSubscription/applyLoadedSeries
+  // can be invoked from inside context.onRender — a closure assigned once
+  // in the "FOXGLOVE SETUP" useLayoutEffect below (it depends only on
+  // [context], which essentially never changes) — so the *first* render's
+  // versions of those functions are what actually run for the panel's
+  // whole lifetime, permanently closed over recStart/recEnd as they were
+  // at mount (undefined, before Foxglove has delivered the recording's
+  // time range). Reading through a ref instead of the closed-over state
+  // variable means ensureRangeSubscription always sees the CURRENT value
+  // no matter which render's closure is executing. This was the root
+  // cause of a bug where series restored via Load Session got their
+  // legend entries back but the plot never loaded (stuck on "loading...").
+  const recStartRef = useRef<number | undefined>(recStart);
+  const recEndRef = useRef<number | undefined>(recEnd);
+  useEffect(() => {
+    recStartRef.current = recStart;
+    recEndRef.current = recEnd;
+  }, [recStart, recEnd]);
 
   // Annotation start/end, published by the Main Panel as global variables
   // (context.setVariable) whenever its drag handles or Set-to-Playhead
@@ -181,6 +228,16 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
   const [renderTick, setRenderTick] = useState(0);
   const lastFlushRef = useRef<number>(0);
 
+  // Guards against reapplying a stale "signalPlotLoadCommand" — the global
+  // variable store keeps holding the last command's value indefinitely
+  // (e.g. across this panel being closed and reopened later), so only a
+  // loadId newer than the last one actually applied should trigger a
+  // reload. Prevents wrongly reapplying an old command on a later reopen
+  // after the user has since manually edited their series. A ref rather
+  // than state since this is read-and-compared inside onRender, not
+  // something the UI needs to re-render on.
+  const lastAppliedLoadIdRef = useRef<number | null>(null);
+
   function requestRedraw(force = false) {
     const now = Date.now();
     if (force || now - lastFlushRef.current > 200) {
@@ -209,6 +266,26 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
 
         const rawSaved = renderState.variables.get("savedAnnotations");
         setSavedAnnotations(Array.isArray(rawSaved) ? rawSaved.filter(isSavedAnnotation) : []);
+
+        // One-shot load command from Main Panel's "Load Session" — only act
+        // when loadId is strictly newer than the last one we applied (see
+        // lastAppliedLoadIdRef above). Fires even for an empty `series`
+        // array, which is what lets loading an older, plot-less session
+        // correctly clear this panel's series.
+        const rawCommand = renderState.variables.get("signalPlotLoadCommand");
+        if (
+          rawCommand != undefined &&
+          typeof rawCommand === "object" &&
+          !Array.isArray(rawCommand) &&
+          typeof (rawCommand as Record<string, unknown>).loadId === "number" &&
+          Array.isArray((rawCommand as Record<string, unknown>).series)
+        ) {
+          const loadId = (rawCommand as Record<string, unknown>).loadId as number;
+          if (lastAppliedLoadIdRef.current == null || loadId > lastAppliedLoadIdRef.current) {
+            lastAppliedLoadIdRef.current = loadId;
+            applyLoadedSeries((rawCommand as Record<string, unknown>).series as unknown[]);
+          }
+        }
       }
 
       if (renderState.currentFrame != undefined && renderState.currentFrame.length > 0) {
@@ -241,6 +318,23 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
     };
   }, []);
 
+  // Continuously publish this panel's series list as a global variable so
+  // Main Panel can snapshot it into a saved session — same pattern Main
+  // Panel already uses to publish "allAnnotations" for other panels to
+  // read, just in the reverse direction. Cast is safe: SeriesConfig is a
+  // plain JSON-shaped object (string/boolean fields only), it just isn't
+  // declared against VariableValue since this file has no reason to import
+  // that type otherwise.
+  useEffect(() => {
+    context.setVariable("signalPlotSeries", series as unknown as VariableValue[]);
+  }, [context, series]);
+
+  useEffect(() => {
+    return () => {
+      context.setVariable("signalPlotSeries", undefined);
+    };
+  }, [context]);
+
   // Live-subscribe to whichever topic the user is currently picking a field
   // for, so we can sample one message and suggest numeric field paths. This
   // is separate from the full-timeline loading below.
@@ -270,8 +364,13 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
     runtimeRef.current.set(s.id, { buckets: makeEmptyBuckets(), count: 0, loading: true, unsupported: false });
     requestRedraw(true);
 
-    const start = recStart;
-    const end = recEnd;
+    // Read through the refs, not the closed-over recStart/recEnd state —
+    // see the comment on recStartRef/recEndRef above for why. This
+    // matters specifically because this function can be called from
+    // applyLoadedSeries, itself called from inside the mount-time
+    // onRender closure.
+    const start = recStartRef.current;
+    const end = recEndRef.current;
 
     const unsubscribe = context.subscribeMessageRange({
       topic: s.topic,
@@ -304,6 +403,48 @@ function SignalPlotPanel({ context }: { context: PanelExtensionContext }): React
     });
 
     rangeUnsubs.current.set(s.id, unsubscribe);
+  }
+
+  // Wholesale-replaces the current series list with one loaded from a saved
+  // session (via Main Panel's "signalPlotLoadCommand"). Same semantics as
+  // annotation import in Main Panel — this doesn't try to diff/merge
+  // against whatever is currently plotted, it just tears down and rebuilds.
+  // Called with an empty array clears the plot entirely, which is the
+  // intended behavior when loading an older, plot-less session.
+  function applyLoadedSeries(rawSeries: unknown[]) {
+    // Tear down every existing subscription and runtime buffer first —
+    // mirrors handleRemoveSeries's cleanup, just for everything at once
+    // rather than one id.
+    rangeUnsubs.current.forEach((unsub) => unsub());
+    rangeUnsubs.current.clear();
+    runtimeRef.current.clear();
+
+    const base = Date.now();
+    const validEntries = rawSeries.filter(isValidPersistedSeries);
+    const nextSeries: SeriesConfig[] = validEntries.map((s, i) => ({
+      // Fresh id, same scheme as handleAddSeries (`${topic}::${field}::${Date.now()}`)
+      // — regenerated rather than round-tripped, exactly like Main Panel
+      // regenerates annotation ids on import. `_${i}` disambiguates
+      // multiple restored entries that would otherwise share the same
+      // millisecond timestamp.
+      id: `${s.topic}::${s.fieldPath}::${base}_${i}`,
+      topic: s.topic,
+      fieldPath: s.fieldPath,
+      color: s.color,
+      visible: s.visible,
+    }));
+
+    setSeries(nextSeries);
+
+    // Start each restored series loading its data — without this, a
+    // restored series would sit in the legend but render as an empty plot,
+    // since ensureRangeSubscription is what actually kicks off
+    // subscribeMessageRange for it.
+    for (const s of nextSeries) {
+      ensureRangeSubscription(s);
+    }
+
+    requestRedraw(true);
   }
 
   // ── SERIES MANAGEMENT ──
